@@ -22,6 +22,7 @@ type Problem
   | ExpectingInt
   | InvalidNumber
   | InvalidPointerIndex Int
+  | InvalidTempIndex Int
   | InvalidPopConstant
   | ExpectingEOF
   | ExpectingStartOfLineComment
@@ -112,6 +113,12 @@ parsePush =
               problem <| InvalidPointerIndex index
             else
               succeed <| InsPush segment index
+            
+          SegTemp ->
+            if index > 7 then
+              problem <| InvalidTempIndex index
+            else
+              succeed <| InsPush segment index
           
           _ ->
             succeed <| InsPush segment index
@@ -136,6 +143,12 @@ parsePop =
           SegPointer ->
             if index /= 0 && index /= 1 then
               problem <| InvalidPointerIndex index
+            else
+              succeed <| InsPop segment index
+                      
+          SegTemp ->
+            if index > 7 then
+              problem <| InvalidTempIndex index
             else
               succeed <| InsPop segment index
           
@@ -235,6 +248,9 @@ showDeadEndsHelper lineNumber src (first, rests) =
     
     InvalidPointerIndex index ->
       "I found an invalid pointer index " ++ String.fromInt index ++ ". I'm expecting either 0 (THIS) or 1 (THAT)"
+    
+    InvalidTempIndex index ->
+      "I found an invalid temp index " ++ String.fromInt index ++ ". I'm expecting an integer between 0 and 7"
     
     InvalidPopConstant ->
       "I found that you are trying to pop a constant. You can only push a constant to the stack"

@@ -17,7 +17,7 @@ suite =
       , test "that" "push that 948" <| Ok [ InsPush SegThat 948 ]
       , test "constant" "push constant 948" <| Ok [ InsPush SegConstant 948 ]
       , test "static" "push static 948" <| Ok [ InsPush SegStatic 948 ]
-      , test "temp" "push temp 948" <| Ok [ InsPush SegTemp 948 ]
+      , test "temp" "push temp 5" <| Ok [ InsPush SegTemp 5 ]
       ]
     , describe "pop instructions"
       [ test "local" "pop local 948" <| Ok [ InsPop SegLocal 948 ]
@@ -26,7 +26,7 @@ suite =
       , test "that" "pop that 948" <| Ok [ InsPop SegThat 948 ]
       , test "constant" "pop constant 948" <| Err [{ col = 17, contextStack = [{ col = 4, context = CtxPop, row = 1 }], problem = InvalidPopConstant, row = 1 }]
       , test "static" "pop static 948" <| Ok [ InsPop SegStatic 948 ]
-      , test "temp" "pop temp 948" <| Ok [ InsPop SegTemp 948 ]
+      , test "temp" "pop temp 5" <| Ok [ InsPop SegTemp 5 ]
       ]
     , describe "arithmetic instructions"
       [ test "add" "add" <| Ok [ InsArith OpAdd ]
@@ -69,6 +69,14 @@ push local 1"""
       ,  test "pop"
         "pop pointer 2" <|
         Err [{ col = 14, contextStack = [{ col = 4, context = CtxPop, row = 1 }], problem = InvalidPointerIndex 2, row = 1 }]
+      ]
+    , describe "invalid temp index"
+      [ test "push"
+        "push temp 8" <|
+        Err [{ col = 12, contextStack = [{ col = 5, context = CtxPush, row = 1 }], problem = InvalidTempIndex 8, row = 1 }]
+      ,  test "pop"
+        "pop temp 8" <|
+        Err [{ col = 11, contextStack = [{ col = 4, context = CtxPop, row = 1 }], problem = InvalidTempIndex 8, row = 1 }]
       ]
     ]
 
