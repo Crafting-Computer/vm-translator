@@ -11,7 +11,8 @@
             "elm/html": "1.0.0",
             "elm/parser": "1.1.0",
             "elm-community/list-extra": "8.2.4",
-            "elm-explorations/test": "1.2.2"
+            "elm-explorations/test": "1.2.2",
+            "the-sett/elm-string-case": "1.0.2"
         },
         "indirect": {
             "elm/json": "1.1.3",
