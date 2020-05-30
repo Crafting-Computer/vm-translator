@@ -66,5 +66,5 @@ main =
         [ pre [] [ text source]
         , pre [] [ text "✔️ Passed parser." ]
         , pre [] [ text "🏭 Emitted assembly:" ]
-        , pre [] [ text <| VmEmitter.emit "basicTest" program ]
+        , pre [] [ text <| VmEmitter.emit "BasicTest" program ]
         ]

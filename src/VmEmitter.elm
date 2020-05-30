@@ -9,7 +9,7 @@ emit :  String -> List Instruction -> String
 emit programName instructions =
   String.join "\n" <|
   List.indexedMap
-    (emitInstruction <| "$" ++ String.Case.toSnakeCaseLower programName)
+    (emitInstruction <| String.Case.toCamelCaseLower programName)
     instructions
 
 
@@ -24,7 +24,7 @@ emitInstruction programName instructionIndex instruction =
       in
       case segment of
         SegStatic ->
-          [ "@" ++ programName ++ "_" ++ i
+          [ "@" ++ programName ++ "." ++ i
           ]
           ++ emitPushA
 
@@ -63,7 +63,7 @@ emitInstruction programName instructionIndex instruction =
       in
       case segment of
         SegStatic ->
-          emitPopA <| "@" ++ programName ++ "_" ++ i
+          emitPopA <| "@" ++ programName ++ "." ++ i
         
         SegPointer ->
           emitPopA <| "@" ++ emitPointerIndex index
