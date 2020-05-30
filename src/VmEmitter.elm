@@ -107,6 +107,38 @@ emitInstruction programName instructionIndex instruction =
         
         OpNot ->
           emitUnaryArith "!"
+    
+    InsLabel label ->
+      emitLabel label.value
+    
+    InsGoto label ->
+      emitGoto label.value
+    
+    InsIfGoto label ->
+      emitIfGoto label.value
+
+
+emitLabel : String -> List String
+emitLabel label =
+  [ "(" ++ label ++ ")"
+  ]
+
+
+emitGoto : String -> List String
+emitGoto label =
+  [ "@" ++ label
+  , "0;JMP"
+  ]
+
+
+emitIfGoto : String -> List String
+emitIfGoto label =
+  [ "@SP"
+  , "AM=M-1"
+  , "D=M"
+  , "@" ++ label
+  , "D;JGT"
+  ]
 
 
 emitUnaryArith : String -> List String

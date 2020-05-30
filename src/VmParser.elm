@@ -3,6 +3,8 @@ module VmParser exposing (parse, showDeadEnds, Instruction(..), Segment(..), Ope
 
 import Parser.Advanced exposing (..)
 import List.Extra
+import Set exposing (Set)
+import Dict exposing (Dict)
 
 
 type alias VmParser a =
@@ -28,12 +30,20 @@ type Problem
   | ExpectingStartOfLineComment
   | ExpectingStartOfMultiLineComment
   | ExpectingEndOfMultiLineComment
+  | ExpectingGoto
+  | ExpectingLabel
+  | ExpectingIfGoto
+  | DuplicatedLabel (Located String) (Located String)
+  | UndefinedLabel (Located String)
 
 
 type Instruction
   = InsPush Segment Int
   | InsPop Segment Int
   | InsArith Operation
+  | InsGoto (Located String)
+  | InsIfGoto (Located String)
+  | InsLabel (Located String)
 
 
 type Segment
@@ -59,6 +69,11 @@ type Operation
   | OpNot
 
 
+reserved : Set String
+reserved =
+  Set.empty
+
+
 parse : String -> Result (List (DeadEnd Context Problem)) (List Instruction)
 parse src =
   run
@@ -67,20 +82,83 @@ parse src =
       |. end ExpectingEOF
     )
     src
+  |> Result.andThen
+  (\(instructions, declaredLabels, usedLabels) ->
+    Dict.foldl
+      (\_ usedLabel problems ->
+        case Dict.get usedLabel.value declaredLabels of
+        Just _ ->
+          problems
+        
+        Nothing ->
+          { row = Tuple.first usedLabel.from
+          , col = Tuple.second usedLabel.from
+          , problem = UndefinedLabel usedLabel
+          , contextStack = []
+          }
+          :: problems
+      )
+      []
+      usedLabels
+    |>
+    (\problems ->
+      if List.isEmpty problems then
+        Ok instructions
+      else
+        Err problems
+    )
+  )
 
 
-parseInstructions : VmParser (List Instruction)
+parseInstructions : VmParser (List Instruction, Dict String (Located String), Dict String (Located String))
 parseInstructions =
-  loop []
-  (\revInstructions ->
+  loop ([], Dict.empty, Dict.empty)
+  (\(revInstructions, declaredLabels, usedLabels) ->
     succeed identity
     |. sps
     |= oneOf
-      [ succeed (\instruction -> Loop <| instruction :: revInstructions)
+      [ succeed identity
         |= parseInstruction
         |. sps
+      |>
+      andThen
+      (\instruction ->
+        let
+          success =
+            ( instruction :: revInstructions
+            
+            , case instruction of
+              InsLabel label ->
+                Dict.insert label.value label declaredLabels
+              
+              _ ->
+                declaredLabels
+
+            , case instruction of
+              InsGoto label ->
+                Dict.insert label.value label usedLabels
+              
+              InsIfGoto label ->
+                Dict.insert label.value label usedLabels
+              
+              _ ->
+                usedLabels
+            )
+        in
+        case instruction of
+          InsLabel label ->
+            case Dict.get label.value declaredLabels of
+              Just prevLabel ->
+                problem <| DuplicatedLabel prevLabel label
+
+              Nothing ->
+                succeed <| Loop success
+          
+          _ ->
+            succeed <| Loop success
+      )
       , succeed ()
-        |> map (\_ -> Done <| List.reverse revInstructions)
+        |> map (\_ -> Done <| (List.reverse revInstructions, declaredLabels, usedLabels))
       ]
   )
 
@@ -90,6 +168,9 @@ parseInstruction =
   oneOf
     [ parsePush
     , parsePop
+    , parseGoto
+    , parseIfGoto
+    , parseLabel
     , parseArith
     ]
 
@@ -184,6 +265,43 @@ parseArith =
   )
 
 
+parseGoto : VmParser Instruction
+parseGoto =
+  succeed
+    InsGoto
+    |. keyword (Token "goto" ExpectingGoto)
+    |. sps
+    |= parseName
+
+
+parseIfGoto : VmParser Instruction
+parseIfGoto =
+  succeed
+    InsIfGoto
+    |. keyword (Token "if-goto" ExpectingIfGoto)
+    |. sps
+    |= parseName
+
+
+parseLabel : VmParser Instruction
+parseLabel =
+  succeed
+    InsLabel
+    |. keyword (Token "label" ExpectingLabel)
+    |. sps
+    |= parseName
+
+
+parseName : VmParser (Located String)
+parseName =
+  located <|
+  variable
+    { start = Char.isUpper
+    , inner = \c -> (Char.isAlphaNum c && (not <| Char.isLower c)) || c == '_'
+    , reserved = reserved
+    , expecting = ExpectingLabel
+    }
+
 
 parseSegment : VmParser Segment
 parseSegment =
@@ -242,28 +360,53 @@ showDeadEndsHelper lineNumber src (first, rests) =
       showProblemContextStack first.contextStack
   in
   location ++ "\n"
-  ++ (case first.problem of
+  ++ String.join "\n"
+  (case first.problem of
     InvalidNumber ->
-      "I found an invalid number. I'm expecting a decimal integer"
+      [ "I found an invalid number."
+      , "Hint: Change it to a nonnegative decimal integer."
+      ]
     
     InvalidPointerIndex index ->
-      "I found an invalid pointer index " ++ String.fromInt index ++ ". I'm expecting either 0 (THIS) or 1 (THAT)"
+      [ "I found an invalid pointer index " ++ String.fromInt index ++ "."
+      , "Hint: Change it to either 0 (THIS) or 1 (THAT)."
+      ]
     
     InvalidTempIndex index ->
-      "I found an invalid temp index " ++ String.fromInt index ++ ". I'm expecting an integer between 0 and 7"
+      [ "I found an invalid temp index " ++ String.fromInt index ++ "."
+      , "Hint: Change it to an integer between 0 and 7."
+      ]
     
     InvalidPopConstant ->
-      "I found that you are trying to pop a constant. You can only push a constant to the stack"
+      [ "I found that you are trying to pop a constant."
+      , "You can only push a constant to the stack."
+      , "Hint: You might want to do one of the followings:"
+      , "1. Change pop into push."
+      , "2. Pop some other memory segments like local and argument."
+      ]
+
+    DuplicatedLabel prevLabel label ->
+      [ "I found a duplicated label `" ++ label.value ++ "`. It has appeared before:"
+      , showLocation src prevLabel
+      , "Hint: Remove one of the duplicated labels."
+      ]
+
+    UndefinedLabel label ->
+      [ "I found an undefined label `" ++ label.value ++ "`."
+      , "Hint: You might want to do one of the followings:"
+      , "1. Declare the label somewhere before using it."
+      , "2. Change it to another label."
+      ]
 
     _ ->
       let
         problemStrs =
           List.map (.problem >> showProblem) <| List.reverse <| first :: rests
       in
-      "I'm expecting " ++ String.join " or " problemStrs
+      [ "I'm expecting " ++ String.join " or " problemStrs
+      ]
   )
-  ++ (if String.isEmpty context then "" else " in the " ++ context)
-  ++ "."
+  ++ (if String.isEmpty context then "" else " in the " ++ context ++ ".")
 
 
 showProblem : Problem -> String
@@ -295,6 +438,15 @@ showProblem p =
     
     ExpectingSegment ->
       "a segment name"
+
+    ExpectingGoto ->
+      "the keyword 'goto'"
+    
+    ExpectingIfGoto ->
+      "the keyword 'if-goto'"
+
+    ExpectingLabel ->
+      "a label"
 
     _ ->
       "PROBLEM"
@@ -358,3 +510,59 @@ getLine : Int -> String -> String
 getLine row src =
   Maybe.withDefault ("CAN'T GET LINE AT ROW " ++ String.fromInt row) -- impossible
     <| List.Extra.getAt (row - 1) <| String.split "\n" src
+
+
+showLocation : String -> Located a -> String
+showLocation src location =
+  let
+    (fromRow, fromCol) =
+      location.from
+    (toRow, toCol) =
+      location.to
+  in
+  showLocationRange fromRow fromCol toRow toCol src
+
+
+showLocationRange : Int -> Int -> Int -> Int -> String -> String
+showLocationRange startRow startCol endRow endCol src =
+  String.join "\n" <|
+  List.map
+  (\row ->
+    let
+      rawLine =
+        getLine row src
+      line =
+        String.fromInt row ++ "| " ++ (String.trimLeft <| rawLine)
+      offset =
+        String.length line - String.length rawLine - 1
+      underlineStartCol =
+        if row == startRow then
+          offset + startCol
+        else
+          1
+      underlineEndCol =
+        if row == endRow then
+          offset + endCol
+        else
+          String.length line
+      underline =
+        makeUnderline line underlineStartCol underlineEndCol
+    in
+    line ++ "\n" ++ underline
+  )
+  (List.range startRow endRow)
+
+
+type alias Located a =
+  { from : (Int, Int)
+  , value : a
+  , to : (Int, Int)
+  }
+
+
+located : VmParser a -> VmParser (Located a)
+located parser =
+  succeed Located
+    |= getPosition
+    |= parser
+    |= getPosition
