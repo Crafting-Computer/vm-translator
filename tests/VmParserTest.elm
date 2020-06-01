@@ -100,6 +100,23 @@ suite =
         "if-goto MY_LABEL" <|
         Err [{ col = 9, contextStack = [], problem = UndefinedLabel { from = (1,9), to = (1,17), value = "MY_LABEL" }, row = 1 }]
       ]
+    , describe "Functions"
+      [ test "function declaration"
+        "function MyFunc 3" <|
+        Ok [InsFunction { from = (1,10), to = (1,16), value = "MyFunc" } 3]
+      , test "call"
+        "function MyFunc 3\ncall MyFunc 2" <|
+        Ok [InsFunction { from = (1,10), to = (1,16), value = "MyFunc" } 3,InsCall { from = (2,6), to = (2,12), value = "MyFunc" } 2]
+      , test "return"
+        "return" <|
+        Ok [InsReturn]
+      , test "duplicated function"
+        "function MyFunc 2\nfunction MyFunc 3" <|
+        Err [{ col = 18, contextStack = [], problem = DuplicatedFunction { from = (1,10), to = (1,16), value = "MyFunc" } { from = (2,10), to = (2,16), value = "MyFunc" }, row = 2 }]
+      , test "undefined function"
+        "call MyFunc 2" <|
+        Err [{ col = 6, contextStack = [], problem = UndefinedFunction { from = (1,6), to = (1,12), value = "MyFunc" }, row = 1 }]
+      ]
     ]
 
 
@@ -107,4 +124,4 @@ test : String -> String -> Result (List (DeadEnd Context Problem)) (List Instruc
 test description src expected =
   Test.test
   description
-  (\_ -> Expect.equal expected (VmParser.parse src))
+  (\_ -> Expect.equal expected (VmParser.parseProgram src))

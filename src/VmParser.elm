@@ -1,4 +1,4 @@
-module VmParser exposing (parse, showDeadEnds, Instruction(..), Segment(..), Operation(..), Context(..), Problem(..))
+module VmParser exposing (parseProject, showProjectDeadEnds, parseProgram, showDeadEnds, Instruction(..), Segment(..), Operation(..), Context(..), Problem(..))
 
 
 import Parser.Advanced exposing (..)
@@ -35,6 +35,12 @@ type Problem
   | ExpectingIfGoto
   | DuplicatedLabel (Located String) (Located String)
   | UndefinedLabel (Located String)
+  | ExpectingFunction
+  | ExpectingCall
+  | ExpectingReturn
+  | ExpectingName
+  | DuplicatedFunction (Located String) (Located String)
+  | UndefinedFunction (Located String)
 
 
 type Instruction
@@ -44,6 +50,9 @@ type Instruction
   | InsGoto (Located String)
   | InsIfGoto (Located String)
   | InsLabel (Located String)
+  | InsFunction (Located String) Int
+  | InsCall (Located String) Int
+  | InsReturn
 
 
 type Segment
@@ -74,32 +83,93 @@ reserved =
   Set.empty
 
 
-parse : String -> Result (List (DeadEnd Context Problem)) (List Instruction)
-parse src =
+parseProject : Dict String String ->
+  Result (Dict String (List (DeadEnd Context Problem))) (Dict String (List Instruction))
+parseProject programs =
+  Dict.foldl
+    (\name src prevResult ->
+      case internalParseProgram src of
+        Err deadEnds ->
+          case prevResult of
+            Ok _ ->
+              Err <|
+              Dict.singleton
+                name
+                deadEnds
+            
+            Err prevDeadEnds ->
+              Err <|
+              Dict.insert
+              name
+              deadEnds
+              prevDeadEnds
+        
+        Ok { instructions } ->
+          case prevResult of
+            Ok asts ->
+              Ok <|
+              Dict.insert
+              name
+              instructions
+              asts
+            
+            Err _ ->
+              prevResult
+    )
+    (Ok Dict.empty)
+    programs
+
+
+
+
+internalParseProgram : String -> Result (List (DeadEnd Context Problem)) ParseOutput
+internalParseProgram src =
   run
     ( succeed identity
       |= parseInstructions
       |. end ExpectingEOF
     )
     src
+
+
+parseProgram : String -> Result (List (DeadEnd Context Problem)) (List Instruction)
+parseProgram src =
+  internalParseProgram src
   |> Result.andThen
-  (\(instructions, declaredLabels, usedLabels) ->
+  (\{instructions, declaredLabels, usedLabels, declaredFuncNames, calledFuncNames} ->
     Dict.foldl
       (\_ usedLabel problems ->
         case Dict.get usedLabel.value declaredLabels of
+          Just _ ->
+            problems
+          
+          Nothing ->
+            { row = Tuple.first usedLabel.from
+            , col = Tuple.second usedLabel.from
+            , problem = UndefinedLabel usedLabel
+            , contextStack = []
+            }
+            :: problems
+      )
+      []
+      usedLabels
+    ++
+    Dict.foldl
+      (\_ calledFuncName problems ->
+        case Dict.get calledFuncName.value declaredFuncNames of
         Just _ ->
           problems
         
         Nothing ->
-          { row = Tuple.first usedLabel.from
-          , col = Tuple.second usedLabel.from
-          , problem = UndefinedLabel usedLabel
+          { row = Tuple.first calledFuncName.from
+          , col = Tuple.second calledFuncName.from
+          , problem = UndefinedFunction calledFuncName
           , contextStack = []
           }
           :: problems
       )
       []
-      usedLabels
+      calledFuncNames
     |>
     (\problems ->
       if List.isEmpty problems then
@@ -110,10 +180,29 @@ parse src =
   )
 
 
-parseInstructions : VmParser (List Instruction, Dict String (Located String), Dict String (Located String))
+type alias Names =
+  Dict String (Located String)
+
+
+type alias ParseOutput =
+  { instructions : List Instruction
+  , declaredLabels : Names
+  , usedLabels : Names
+  , declaredFuncNames : Names
+  , calledFuncNames : Names
+  }
+
+
+parseInstructions : VmParser ParseOutput
 parseInstructions =
-  loop ([], Dict.empty, Dict.empty)
-  (\(revInstructions, declaredLabels, usedLabels) ->
+  loop
+    { instructions = []
+    , declaredLabels = Dict.empty
+    , usedLabels = Dict.empty
+    , declaredFuncNames = Dict.empty
+    , calledFuncNames = Dict.empty
+    }
+  (\{instructions, declaredLabels, usedLabels, declaredFuncNames, calledFuncNames} ->
     succeed identity
     |. sps
     |= oneOf
@@ -124,26 +213,49 @@ parseInstructions =
       andThen
       (\instruction ->
         let
-          success =
-            ( instruction :: revInstructions
-            
-            , case instruction of
-              InsLabel label ->
-                Dict.insert label.value label declaredLabels
-              
-              _ ->
-                declaredLabels
+          insert : Located String -> Names -> Names
+          insert label dict =
+            Dict.insert label.value label dict
 
-            , case instruction of
-              InsGoto label ->
-                Dict.insert label.value label usedLabels
-              
-              InsIfGoto label ->
-                Dict.insert label.value label usedLabels
-              
-              _ ->
-                usedLabels
-            )
+          success =
+            { instructions =
+              instruction :: instructions
+            
+            , declaredLabels =
+              case instruction of
+                InsLabel label ->
+                  insert label declaredLabels
+                
+                _ ->
+                  declaredLabels
+
+            , usedLabels =
+              case instruction of
+                InsGoto label ->
+                  insert label usedLabels
+                
+                InsIfGoto label ->
+                  insert label usedLabels
+                
+                _ ->
+                  usedLabels
+            
+            , declaredFuncNames =
+              case instruction of
+                InsFunction name _ ->
+                  insert name declaredFuncNames
+                
+                _ ->
+                  declaredFuncNames
+            
+            , calledFuncNames =
+              case instruction of
+                InsCall name _ ->
+                  insert name calledFuncNames
+                
+                _ ->
+                  calledFuncNames
+            }
         in
         case instruction of
           InsLabel label ->
@@ -154,11 +266,31 @@ parseInstructions =
               Nothing ->
                 succeed <| Loop success
           
+          InsFunction name _ ->
+            case Dict.get name.value declaredFuncNames of
+              Just prevName ->
+                problem <| DuplicatedFunction prevName name
+
+              Nothing ->
+                succeed <| Loop success
+          
           _ ->
             succeed <| Loop success
       )
       , succeed ()
-        |> map (\_ -> Done <| (List.reverse revInstructions, declaredLabels, usedLabels))
+        |> map (\_ -> Done <|
+          { instructions =
+            List.reverse instructions
+          , declaredLabels =
+            declaredLabels
+          , usedLabels =
+            usedLabels
+          , declaredFuncNames =
+            declaredFuncNames
+          , calledFuncNames =
+            calledFuncNames
+          }
+        )
       ]
   )
 
@@ -171,8 +303,41 @@ parseInstruction =
     , parseGoto
     , parseIfGoto
     , parseLabel
+    , parseFunction
+    , parseCall
+    , parseReturn
     , parseArith
     ]
+
+
+parseReturn : VmParser Instruction
+parseReturn =
+  succeed InsReturn
+    |. keyword (Token "return" ExpectingReturn)
+
+
+-- call functionName nArgs
+parseCall : VmParser Instruction
+parseCall =
+  succeed
+    InsCall
+    |. keyword (Token "call" ExpectingCall)
+    |. sps
+    |= parseName
+    |. sps
+    |= parseInt
+
+
+-- function functionName nVars
+parseFunction : VmParser Instruction
+parseFunction =
+  succeed
+    InsFunction
+    |. keyword (Token "function" ExpectingFunction)
+    |. sps
+    |= parseName
+    |. sps
+    |= parseInt
 
 
 parsePush : VmParser Instruction
@@ -184,7 +349,7 @@ parsePush =
         |. sps
         |= parseSegment
         |. sps
-        |= int ExpectingInt InvalidNumber
+        |= parseInt
       ) |>
       andThen
       (\(segment, index) ->
@@ -216,7 +381,7 @@ parsePop =
         |. sps
         |= parseSegment
         |. sps
-        |= int ExpectingInt InvalidNumber
+        |= parseInt
       ) |>
       andThen
       (\(segment, index) ->
@@ -296,11 +461,16 @@ parseName : VmParser (Located String)
 parseName =
   located <|
   variable
-    { start = Char.isUpper
-    , inner = \c -> (Char.isAlphaNum c && (not <| Char.isLower c)) || c == '_'
+    { start = Char.isAlpha
+    , inner = \c -> Char.isAlphaNum c || c == '_' || c == '.'
     , reserved = reserved
-    , expecting = ExpectingLabel
+    , expecting = ExpectingName
     }
+
+
+parseInt : VmParser Int
+parseInt =
+  int ExpectingInt InvalidNumber
 
 
 parseSegment : VmParser Segment
@@ -342,20 +512,37 @@ ifProgress parser offset =
     |> map (\newOffset -> if offset == newOffset then Done () else Loop newOffset)
 
 
-showDeadEnds : Maybe Int -> String -> List (DeadEnd Context Problem) -> String
-showDeadEnds lineNumber src deadEnds =
+showProjectDeadEnds : Dict String String -> Dict String (List (DeadEnd Context Problem)) -> String
+showProjectDeadEnds projectSources projectDeadEnds =
+  Dict.foldl
+  (\programName deadEnds str ->
+    case Dict.get programName projectSources of
+      Just src ->
+        "-- PARSE ERROR in " ++ programName ++ ".vm\n\n"
+        ++ showDeadEnds src deadEnds ++ "\n\n"
+        ++ str
+      
+      Nothing ->
+        str
+  )
+  ""
+  projectDeadEnds
+
+
+showDeadEnds : String -> List (DeadEnd Context Problem) -> String
+showDeadEnds src deadEnds =
   let
     deadEndGroups =
       List.Extra.groupWhile (\d1 d2 -> d1.row == d2.row && d1.col == d2.col) <| deadEnds
   in
-  String.join "\n" <| List.map (showDeadEndsHelper lineNumber src) deadEndGroups
+  String.join "\n" <| List.map (showDeadEndsHelper src) deadEndGroups
 
 
-showDeadEndsHelper : Maybe Int -> String -> ((DeadEnd Context Problem), List (DeadEnd Context Problem)) -> String
-showDeadEndsHelper lineNumber src (first, rests) =
+showDeadEndsHelper : String -> ((DeadEnd Context Problem), List (DeadEnd Context Problem)) -> String
+showDeadEndsHelper src (first, rests) =
   let
     location =
-      showProblemLocation lineNumber first.row first.col src
+      showProblemLocation first.row first.col src
     context =
       showProblemContextStack first.contextStack
   in
@@ -395,7 +582,20 @@ showDeadEndsHelper lineNumber src (first, rests) =
       [ "I found an undefined label `" ++ label.value ++ "`."
       , "Hint: You might want to do one of the followings:"
       , "1. Declare the label somewhere before using it."
-      , "2. Change it to another label."
+      , "2. Use another label instead."
+      ]
+
+    DuplicatedFunction prevName name ->
+      [ "I found a duplicated function `" ++ name.value ++ "`. It has appeared before:"
+      , showLocation src prevName
+      , "Hint: Remove one of the duplicated functions."
+      ]
+
+    UndefinedFunction name ->
+      [ "I found an undefined function `" ++ name.value ++ "`."
+      , "Hint: You might want to do one of the followings:"
+      , "1. Declare the function somewhere before calling it."
+      , "2. Call another function instead."
       ]
 
     _ ->
@@ -440,13 +640,25 @@ showProblem p =
       "a segment name"
 
     ExpectingGoto ->
-      "the keyword 'goto'"
+      "a goto instruction"
     
     ExpectingIfGoto ->
-      "the keyword 'if-goto'"
+      "an if-goto instruction"
 
     ExpectingLabel ->
-      "a label"
+      "a label instruction"
+
+    ExpectingName ->
+      "a name"
+
+    ExpectingFunction ->
+      "a function instruction"
+    
+    ExpectingCall ->
+      "a call instruction"
+    
+    ExpectingReturn ->
+      "a return instruction"
 
     _ ->
       "PROBLEM"
@@ -467,18 +679,13 @@ showProblemContext context =
       "pop instruction"
 
 
-showProblemLocation : Maybe Int -> Int -> Int -> String -> String
-showProblemLocation customLineNumber row col src =
+showProblemLocation : Int -> Int -> String -> String
+showProblemLocation row col src =
   let
     rawLine =
       getLine row src
     lineNumber =
-      case customLineNumber of
-        Nothing ->
-          row
-        
-        Just number ->
-          number
+      row
     line =
       String.fromInt lineNumber ++ "| " ++ (String.trimLeft <| rawLine)
     offset =
